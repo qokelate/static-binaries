@@ -1,0 +1,187 @@
+#!/bin/sh
+
+set -ue
+
+magic='iLWDLaG9dUlsxzEQp10k'
+fpath_pos=2317952
+script_pos=2289632
+terminfo_pos=2313824
+
+usage="$(cat <<-\USAGE
+Usage: relocate [-s SRC] [-d DST]
+
+Modifies hard-coded paths within Zsh residing in directory SRC
+so that they point to directory DST.
+
+The source directory must exist but the destination directory
+does not have to.
+
+Options:
+
+  -s SRC  directory where Zsh is currently installed; this is the
+          directory with 'bin' and 'usr' as subdirectories; if not
+          specified, this directory is automatically derived from
+          path to 'relocate'
+  -d DST  directory from which Zsh will be used; this is the
+          directory with 'bin' and 'usr' as subdirectories; if not
+          specified, this directory is automatically derived from
+          path to 'relocate'
+USAGE
+)"
+
+src=
+dst=
+
+while getopts ':s:d:h' opt "$@"; do
+  case "$opt" in
+    h)
+      printf '%s\n' "$usage"
+      exit
+    ;;
+    s)
+      if [ -n "$src" ]; then
+        >&2 echo "[error] duplicate option: -$opt"
+        exit 1
+      fi
+      if [ -z "$OPTARG" ]; then
+        >&2 echo "[error] incorrect value of -$opt: $OPTARG"
+        exit 1
+      fi
+      src="$OPTARG"
+    ;;
+    d)
+      if [ -n "$dst" ]; then
+        >&2 echo "[error] duplicate option: -$opt"
+        exit 1
+      fi
+      if [ -z "$OPTARG" ]; then
+        >&2 echo "[error] incorrect value of -$opt: $OPTARG"
+        exit 1
+      fi
+      dst="$OPTARG"
+    ;;
+    \?) >&2 echo "[error] invalid option: -$OPTARG"           ; exit 1;;
+    :)  >&2 echo "[error] missing required argument: -$OPTARG"; exit 1;;
+    *)  >&2 echo "[internal error] unhandled option: -$opt"   ; exit 1;;
+  esac
+done
+
+if [ "$OPTIND" -le $# ]; then
+  >&2 echo "[error] unexpected positional argument"
+  exit 1
+fi
+
+if [ -z "$src" ]; then
+  src="$(dirname -- "$0")"/../../../..
+fi
+
+absdir() {
+  ( [ -d "$1" ] && cd -- "$1" && pwd )
+}
+
+if ! src="$(absdir "$src")"; then
+  >&2 echo "[error] not a directory: $src"
+  exit 1
+fi
+
+if [ -n "$dst" ]; then
+  if [ -n "${dst##/*}" ]; then
+    >&2 echo "[error] path not absolute: $dst"
+    exit 1
+  fi
+else
+  dst="$(dirname -- "$0")"/../../../..
+  if ! dst="$(absdir "$dst")"; then
+    >&2 echo "[error] not a directory: $dst"
+    exit 1
+  fi
+fi
+
+zsh="$src"/bin/zsh
+runhelp="$src"/share/zsh/5.8/functions/run-help
+runhelpcomp="$src"/share/zsh/5.8/functions/_run-help
+
+if [ ! -x "$zsh" ]; then
+  >&2 echo "[error] not an executable file: $zsh"
+  exit 1
+fi
+
+if ! grep -qF 'local HELPDIR' -- "$runhelp"; then
+  >&2 echo "[error] cannot relocate zsh from this directory: $src"
+  exit 1
+fi
+
+if ! grep -qF 'local HELPDIR' -- "$runhelpcomp"; then
+  >&2 echo "[error] cannot relocate zsh from this directory: $src"
+  exit 1
+fi
+
+dst="${dst%/}/"
+
+# 4096 minus 23 for "share/zsh/5.8/functions"
+if [ ${#dst} -gt 4073 ]; then
+  >&2 echo "[error] directory name too long: $dst"
+  exit 1
+fi
+
+if [ -z "${dst##*$magic*}" ]; then
+  >&2 echo "[error] cannot relocate to this directory: $dst"
+  exit 1
+fi
+
+cp -pf -- "$zsh" "$zsh".tmp
+
+patch_help() {
+  local data
+  data="$(cat -- "$1")"
+  local prefix="${data%%$magic*}"
+  local suffix="${data##*$magic}"
+  if [ "$prefix" = "$data" -o "$suffix" = "$data" ]; then
+    >&2 echo "[error] not a relocatable zsh directory: $src"
+    exit 1
+  fi
+  local dir="$dst"share/zsh/5.8/help
+  printf '%s\n%s\n%s\n' "$prefix$magic" "$dir" "$magic$suffix" >"$1".tmp
+}
+
+patch_bin() {
+  local header_len=$((1 + ${#magic} + 1 + ${#2} + 1))
+  local header
+  if ! header="$(dd if="$zsh" bs=1 skip="$1" count="$header_len" 2>/dev/null)"; then
+    header="$(dd if="$zsh" bs=1 skip="$1" count="$header_len")"
+  fi
+  if [ "$header" != ":$magic:$2:" ]; then
+    >&2 echo "[error] not a relocatable zsh binary: $zsh"
+    exit 1
+  fi
+
+  local pos=$(($1 + header_len))
+  local dir="${dst}$3"
+  local err
+  if ! err="$(dd if=/dev/zero of="$zsh".tmp bs=1 seek="$pos" count=4096 conv=notrunc 2>&1)"; then
+    >&2 printf '%s\n' "$err"
+    exit 1
+  fi
+  if ! err="$(printf '%s' "$dir" |
+               dd of="$zsh".tmp bs=1 seek="$pos" count=${#dir} conv=notrunc 2>&1)"; then
+    >&2 printf '%s\n' "$err"
+    exit 1
+  fi
+}
+
+patch_help "$runhelp"
+patch_help "$runhelpcomp"
+
+patch_bin "$fpath_pos"    fpath    share/zsh/5.8/functions
+patch_bin "$script_pos"   script   share/zsh/5.8/scripts
+patch_bin "$terminfo_pos" terminfo share/terminfo
+
+if ! fpath="$(unset FPATH && "$zsh".tmp -c 'print -r -- $fpath[1]')" ||
+   [ "${fpath#$dst}" = "$fpath" ]; then
+  >&2 echo "[error] failed to relocate zsh"
+  exit 1
+fi
+
+mv -f -- "$zsh".tmp "$zsh"
+mv -f -- "$runhelp".tmp "$runhelp"
+mv -f -- "$runhelpcomp".tmp "$runhelpcomp"

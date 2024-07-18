@@ -8,6 +8,7 @@ https://damiendebin.net/files/esxi-static-rsync-3-1-0.tar.gz
 https://johnvansickle.com/ffmpeg/builds/ffmpeg-git-amd64-static.tar.xz
 https://github.com/romkatv/zsh-bin.git
 https://github.com/qokelate/haproxy-static-build.git
+https://github.com/jbruechert/rsync-static.git
 
 
 macos:
